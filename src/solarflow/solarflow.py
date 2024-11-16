@@ -25,7 +25,7 @@ BATTERY_TARGET_DISCHARGING = "discharging"
 
 # according to https://github.com/epicRE/zendure_ble
 INVERTER_BRAND = {0: 'Other', 1: 'Hoymiles', 2: 'Enphase', 3: 'APsystems', 4: 'Anker', 5: 'Deye', 6: 'BossWerk', 7: 'Tsun'}
-
+AC_MODE = {'NOTHING': 0, 'AC_INPUT': 1, 'CHARGING': 1, 'AC_OUTPUT': 2, 'DISCHARGING': 2}
 
 class Solarflow:
     opts = {"product_id":str, "device_id":str ,"full_charge_interval":int, "control_bypass":bool, "control_soc":bool, "disable_full_discharge":bool}
@@ -53,13 +53,16 @@ class Solarflow:
         self.batteriesSoC = {"none":-1}    # state of charge for individual batteries
         self.batteriesVol = {"none":-1}    # voltage for individual batteries
         self.outputLimit = -1           # power limit for home output
+        self.inputLimit = -1           # power limit for hyper input
         self.inverseMaxPower = 300      # maximum power sent to inverter from hub (read and updated from hub)
         self.outputLimitBuffer = TimewindowBuffer(minutes=1)
+        self.inputLimitBuffer = TimewindowBuffer(minutes=1)
         self.lastFullTS = None          # keep track of last time the battery pack was full (100%)
         self.lastEmptyTS = None         # keep track of last time the battery pack was empty (0%)
         self.lastSolarInputTS = None    # time of the last received solar input value
         self.batteryTarget = None
         self.allowFullCycle = not disable_full_discharge
+        self.acMode = AC_MODE.get('Nothing')
         
         self.batteryTargetSoCMax = -1
         self.batteryTargetSoCMin = -1
@@ -250,6 +253,19 @@ class Solarflow:
     def updOutputLimit(self, value:int):
         self.outputLimit = value
 
+    def updInputLimit(self, value:int):
+        self.inputLimit = value
+    
+    def setAcMode(self, value:int):
+        self.acMode = value
+        
+        acmode = {"properties": { "acMode": value }}
+        self.clientCloud.publish(self.property_topic,json.dumps(acmode))
+        log.info(f'Setting ac mode to {value} ({AC_MODE.get(value)})')
+
+    def updAcMode(self, value:int):
+        self.acMode = value
+
     def updInverseMaxPower(self, value:int):
         self.inverseMaxPower = value
 
@@ -355,18 +371,28 @@ class Solarflow:
         if self.productId in msg.topic:
             device_id = msg.topic.split('/')[2]
             payload = json.loads(msg.payload.decode())
+
             if "properties" in payload:
                 props = payload["properties"]
-                for prop, val in props.items():
-                    self.clientLocal.publish(f'solarflow-hub/{device_id}/telemetry/{prop}',val)
+                if isinstance(props, dict):
+                    for prop, val in props.items():
+                        self.clientLocal.publish(f'solarflow-hub/{device_id}/telemetry/{prop}', val)
+                else:
+                    log.error(f"Expected 'properties' to be a dict, but got {type(props)} (payload: {payload})")
 
             if "packData" in payload:
                 packdata = payload["packData"]
-                if len(packdata) > 0:
+                if isinstance(packdata, list) and len(packdata) > 0:
                     for pack in packdata:
-                        sn = pack.pop('sn')
-                        for prop, val in pack.items():
-                            self.clientLocal.publish(f'solarflow-hub/{device_id}/telemetry/batteries/{sn}/{prop}',val)
+                        if isinstance(pack, dict):
+                            sn = pack.pop('sn', None)
+                            if sn is not None:
+                                for prop, val in pack.items():
+                                    self.clientLocal.publish(f'solarflow-hub/{device_id}/telemetry/batteries/{sn}/{prop}', val)
+                        else:
+                            log.error(f"Expected each item in 'packData' to be a dict, but got {type(pack)}")
+                else:
+                    log.error(f"Expected 'packData' to be a non-empty list, but got {type(packdata)}")
 
         if msg.topic.startswith('solarflow-hub') and msg.payload:
             # check if we got regular updates on solarInputPower
@@ -394,6 +420,8 @@ class Solarflow:
                     self.updOutputHome(int(value))
                 case "outputLimit":
                     self.updOutputLimit(int(value))
+                case "inputLimit":
+                    self.updInputLimit(int(value))
                 case "inverseMaxPower":
                     self.updInverseMaxPower(int(value))
                 case "socLevel":
@@ -424,6 +452,8 @@ class Solarflow:
                     self.updBatteryTargetSoCMax(int(value))
                 case "minSoc":
                     self.updBatteryTargetSoCMin(int(value))
+                case "acMode":
+                    self.updAcMode(int(value))
                 case "chargeThroughState":
                     pass
                 case _:
@@ -437,7 +467,7 @@ class Solarflow:
         if self.lastLimitTS:
             elapsed = now - self.lastLimitTS
             if elapsed.total_seconds() < 30:
-                log.info(f'Hub has recently adjusted limit, need to wait until it is set again! Current limit: {self.outputLimit:.0f}, new limit: {limit:.1f}')
+                log.info(f'Hub has recently adjusted output limit, need to wait until it is set again! Current limit: {self.outputLimit:.0f}, new limit: {limit:.1f}')
                 return self.outputLimit
 
         if limit < 0:
@@ -481,6 +511,57 @@ class Solarflow:
         else:
             log.info(f'{"[DRYRUN] " if self.dryrun else ""}Not setting solarflow output limit to {limit:.1f}W as it is identical to current limit!')
         return limit
+
+
+    def setInputLimit(self, limit:int):
+
+      # since the hub is slow in adoption we should not try to set the limit too frequently
+        # 30-45s seems ok
+        now = datetime.now()
+        if self.lastLimitTS:
+            elapsed = now - self.lastLimitTS
+            if elapsed.total_seconds() < 30:
+                log.info(f'Hub has recently adjusted input limit, need to wait until it is set again! Current limit: {self.inputLimit:.0f}, new limit: {limit:.1f}')
+                return self.inputLimit
+
+        if limit < 0:
+            limit = 0
+
+        # If battery SoC reaches 0% during night, it has been observed that in the morning with first light, residual energy in the batteries gets released
+        # Hub goes then into error and no charging occurs (probably deep discharge assumed by the battery).
+        # Hence setting the output limit 0 if SoC 0%
+        if self.electricLevel == 0:
+            limit = 0
+            log.info(f'Battery is empty! Disabling solarflow output, setting limit to {limit}')
+
+
+        # Charge-Through:
+        # If charge-through is enabled the hub will not provide any power if the last full state is to long ago
+        # this ensures regular loading to 100% to avoid battery-drift            
+        if self.chargeThrough and limit > 0 and self.batteryTarget == BATTERY_TARGET_CHARGING:
+            log.info(f'Charge-Through is active! To ensure it is fully charged at least every {self.fullChargeInterval}hrs not discharging now!')
+            # either limit to 0 or only give away what is higher than min_charge_level
+            limit = 0
+
+        # currently the hub doesn't support single steps for limits below 100
+        # to get a fine granular steering at this level we need to fall back to the inverter limit
+        # if controlling the inverter is not possible we should stick to either 0 or 100W
+        if limit <= 100:
+            #limitInverter(client,limit)
+            #log.info(f'The output limit would be below 100W ({limit}W). Would need to limit the inverter to match it precisely')
+            m = divmod(limit,30)[0]
+            r = divmod(limit,30)[1]
+            limit = 30 * m + 30 * (r // 15)
+
+        inputlimit = {"properties": { "inputLimit": limit }}
+        if self.inputLimit != limit:
+            (not self.dryrun) and self.clientCloud.publish(self.property_topic,json.dumps(inputlimit))
+            self.lastLimitTS = now
+            log.info(f'{"[DRYRUN] " if self.dryrun else ""}Setting solarflow intput limit to {limit:.1f}W')
+        else:
+            log.info(f'{"[DRYRUN] " if self.dryrun else ""}Not setting solarflow intput limit to {limit:.1f}W as it is identical to current limit!')
+        return limit
+
 
     def setBuzzer(self, state: bool):
         buzzer = {"properties": { "buzzerSwitch": 0 if not state else 1 }}
@@ -538,6 +619,9 @@ class Solarflow:
 
     def getBypass(self):
         return self.bypass
+    
+    def getAcMode(self):
+        return self.acMode
         
     def getCanDischarge(self):
         fullage = self.getLastFullBattery()
@@ -585,7 +669,7 @@ class Solarflow:
         if value <= 100:
             value = 100
         payload = {"properties": { "inverseMaxPower": value }}
-        self.clientCloud.publish(self.property_topic,json.dumps(payload))
+        #self.clientCloud.publish(self.property_topic,json.dumps(payload))
         self.inverseMaxPower = value
         return value
     

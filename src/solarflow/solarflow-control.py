@@ -13,7 +13,7 @@ from solarflow import Solarflow
 import dtus
 import smartmeters
 from utils import RepeatedTimer, str2bool
-import webService
+import webService 
 
 FORMAT = '%(asctime)s:%(levelname)s: %(message)s'
 logging.basicConfig(stream=sys.stdout, level="INFO", format=FORMAT)
@@ -141,7 +141,7 @@ def on_connect_cloud(client, userdata, flags, rc):
         #hub.subscribe()
         hub.setBuzzer(False)
         hub.setPvBrand(1)
-        hub.setInverseMaxPower(MAX_INVERTER_INPUT)
+        #hub.setInverseMaxPower(MAX_INVERTER_INPUT)
         hub.setBatteryHighSoC(BATTERY_HIGH)
         hub.setBatteryLowSoC(BATTERY_LOW)
         if hub.control_bypass:
@@ -207,7 +207,7 @@ def on_connect(client, userdata, flags, rc):
         #hub.subscribe()
         hub.setBuzzer(False)
         hub.setPvBrand(1)
-        hub.setInverseMaxPower(MAX_INVERTER_INPUT)
+        #hub.setInverseMaxPower(MAX_INVERTER_INPUT)
         hub.setBatteryHighSoC(BATTERY_HIGH)
         hub.setBatteryLowSoC(BATTERY_LOW)
         if hub.control_bypass:
@@ -340,10 +340,10 @@ def getSFPowerLimit(hub, demand) -> int:
     return int(limit)
 
 
-def limitHomeInput(client: mqtt_client, zendure_client: mqtt_client):
+def limitHomeInput(client: mqtt_client):
     global location
 
-    hub = zendure_client._userdata['hub']
+    hub = client._userdata['hub']
     log.info(f'{hub}')
     inv = client._userdata['dtu']
     log.info(f'{inv}')
@@ -351,7 +351,11 @@ def limitHomeInput(client: mqtt_client, zendure_client: mqtt_client):
     log.info(f'{smt}')
 
     # ensure we have data to work on
-    if not(hub.ready() and inv.ready() and smt.ready()):
+    invready = inv.ready()
+    if config.get('global', "dtu_type") == "None":
+        invready = True
+        
+    if not(hub.ready() and invready and smt.ready()):
         return
 
     inv_limit = inv.getLimit()
@@ -412,7 +416,7 @@ def limitHomeInput(client: mqtt_client, zendure_client: mqtt_client):
 
                     # if the hub's contribution (per channel) is larger than what the direct panels max is delivering (night, low light)
                     # then we can open the hub to max limit and use the inverter to limit it's output (more precise)
-                    if sf_contribution/inv.getNrHubChannels() >= max(inv.getDirectDCPowerValues()) * (inv.getEfficiency()/100):
+                    if inv.getNrHubChannels() > 0 and sf_contribution/inv.getNrHubChannels() >= max(inv.getDirectDCPowerValues()) * (inv.getEfficiency()/100):
                         log.info(f'Hub should contribute more ({sf_contribution:.1f}W) than what we currently get max from panels ({max(inv.getDirectDCPowerValues()) * (inv.getEfficiency()/100):.1f}W), we will use the inverter for fast/precise limiting!')
                         hub_limit = hub.setOutputLimit(0) if hub.getBypass() else hub.setOutputLimit(hub.getInverseMaxPower())
                         direct_limit = sf_contribution/inv.getNrHubChannels()
@@ -422,13 +426,47 @@ def limitHomeInput(client: mqtt_client, zendure_client: mqtt_client):
                         direct_limit = getDirectPanelLimit(inv,hub,smt)
                         log.info(f'Direct connected panel limit is {direct_limit}W.')
 
+    elif config.getboolean('global', "grid_charge"):
+        # no inverter, no sun, only grid 
+        # if we are in grid charge mode, we should always charge the battery    
+        # if the battery is full, we should not charge
+        # if the battery is empty, we should charge
+        # if the battery is in between, we should charge if the grid power is higher than the minimum charge power
+        # if the grid power is lower than the minimum charge power, we should not charge
+        # if the grid power is negative, we should not charge
+        # if the grid power is positive, we should charge
+
+        if hub.getElectricLevel() < BATTERY_HIGH and grid_power > MIN_CHARGE_POWER:
+            log.info(f'Grid power is {grid_power}W, setting battery target to CHARGING')
+            currenteMode = hub.getAcMode()
+            if currenteMode is None and not 1:
+                log.info(f'Hub is not in CHARGING mode, setting it now!')
+                hub.setAcMode(1)
+            
+            hub.setInputLimit(100)
+            
+        else: # battery is full or grid power is negative   
+            log.info(f'Grid power is {grid_power}W, setting battery target to DISCHARGING')
+            currenteMode = hub.getAcMode()
+            if currenteMode is None and not 2:
+                log.info(f'Hub is not in DISCHARGING mode, setting it now!')
+                hub.setAcMode(2)
+            
+            #hub.setAcMode(hub.AC_MODE.get('DISCHARGING'))
+            #hub.setAcMode(2)
+            hub.setOutputLimit(100)
+        
+        
     # likely no sun, not producing, eveything comes from hub
     else:
         log.info(f'Direct connected panel are producing {direct_panel_power:.1f}W, trying to get {hub_contribution_ask:.1f}W from hub.')
         # check what hub is currently  willing to contribute
         sf_contribution = getSFPowerLimit(hub,hub_contribution_ask)
         hub_limit = hub.setOutputLimit(hub.getInverseMaxPower())
-        direct_limit = sf_contribution/inv.getNrHubChannels()
+        if inv.getNrHubChannels() > 0:
+            direct_limit = sf_contribution / inv.getNrHubChannels()
+        else:
+            direct_limit = 0
         log.info(f'Solarflow is willing to contribute {direct_limit:.1f}W (per channel) of the requested {hub_contribution_ask:.1f}!')
 
 
@@ -485,7 +523,7 @@ def getOpts(configtype) -> dict:
             log.info(f'No config setting found for option "{opt}" in section {configtype.__name__.lower()}!')
     return opts
 
-def limit_callback(client: mqtt_client, zendure_client:mqtt_client, force=False):
+def limit_callback(client: mqtt_client,  force=False):
     global lastTriggerTS
     #log.info("Smartmeter Callback!")
     now = datetime.now()
@@ -500,11 +538,11 @@ def limit_callback(client: mqtt_client, zendure_client:mqtt_client, force=False)
             return False
     else:
         lastTriggerTS = now
-        limitHomeInput(client,zendure_client)
+        limitHomeInput(client)
         return True
 
-def deviceInfo(client:mqtt_client, zendure_client:mqtt_client):
-    limitHomeInput(client, zendure_client)
+def deviceInfo(client:mqtt_client):
+    limitHomeInput(client)
     '''
     hub = client._userdata['hub']
     log.info(f'{hub}')
@@ -543,7 +581,13 @@ def run():
     hub = Solarflow(clientLocal=client, clientCloud=zendure_client, callback=limit_callback, **hub_opts)
     log.info(f"Hub initialized with options: {hub_opts}")
 
-    dtuType = getattr(dtus, DTU_TYPE)
+    if DTU_TYPE == "None":
+        dtuType = None
+        dtuTypeTemp = "OpenDTU"
+    else:
+        dtuTypeTemp = DTU_TYPE
+
+    dtuType = getattr(dtus, dtuTypeTemp)
     dtu_opts = getOpts(dtuType)
     dtu = dtuType(client=client, ac_limit=MAX_INVERTER_LIMIT, callback=limit_callback, **dtu_opts)
     log.info(f"DTU initialized with options: {dtu_opts}")
@@ -557,11 +601,11 @@ def run():
     client.on_message = on_message
     log.info("Local client user data and on_message set")
 
-    zendure_client.user_data_set({"hub": hub})
+    zendure_client.user_data_set({"hub": hub, "dtu": dtu, "smartmeter": smt})
     zendure_client.on_message = on_message_cloud
     log.info("Zendure client user data and on_message_cloud set")
 
-    infotimer = RepeatedTimer(120, deviceInfo, client, zendure_client)
+    infotimer = RepeatedTimer(120, deviceInfo, client)
     log.info("Infotimer started")
 
     # Start both clients in separate threads
@@ -605,6 +649,12 @@ def getClientId(cloud: bool = False):
             config.get('cloudweb', 'token_url', fallback=None)
         )
         token_expiry_time = current_time + 300  # Token expires in 5 minutes (300 seconds)
+        log.info(f"Access token refreshed at {datetime.fromtimestamp(current_time).strftime('%Y-%m-%d %H:%M:%S')}")
+    
+    devicelist = webService.get_device_list(access_token, config.get('cloudweb', 'device_list_url', fallback=None))
+    if devicelist:
+        log.info(f"Device list: {devicelist}")
+        
     return access_token
 
 def getMqttPwd(cloud:bool = False):

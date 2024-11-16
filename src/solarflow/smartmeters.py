@@ -18,10 +18,10 @@ log = logging.getLogger("")
 class Smartmeter:
     opts = {"base_topic":str, "cur_accessor":str, "total_accessor":str, "rapid_change_diff":int, "zero_offset": int, "scaling_factor":int}
 
-    def default_calllback(self):
+    def default_calllback(self, client, force=False):
         log.info("default callback")
 
-    def __init__(self, client: mqtt_client, base_topic:str, cur_accessor:str = "Power.Power_curr", total_accessor:str = "Power.Total_in", rapid_change_diff:int = 500, zero_offset:int = 0, scaling_factor:int = 1, callback = default_calllback):
+    def __init__(self, client: mqtt_client, base_topic:str, cur_accessor:str = "Power.Power_curr", total_accessor:str = "Power.Total_in", rapid_change_diff:int = 500, zero_offset:int = 0, scaling_factor:int = 1, callback = None):
         self.client = client
         self.base_topic = base_topic
         self.power = TimewindowBuffer(minutes=1)
@@ -31,7 +31,7 @@ class Smartmeter:
         self.rapid_change_diff = rapid_change_diff
         self.zero_offset = zero_offset
         self.last_trigger_value = 0
-        self.trigger_callback = callback
+        self.trigger_callback = callback if callback else self.default_calllback
         self.scaling_factor = scaling_factor
         log.info(f'Using {type(self).__name__}: Base topic: {self.base_topic}, Current power accessor: {self.cur_accessor}, Total power accessor: {self.total_accessor}, Rapid change diff: {self.rapid_change_diff}W, Zero offset: {self.zero_offset}W, Scaling factor: {self.scaling_factor}')
 
