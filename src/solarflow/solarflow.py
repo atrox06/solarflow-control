@@ -17,6 +17,7 @@ TRIGGER_DIFF = 30
 
 HUB1200 = "73bkTV"
 HUB2000 = "A8yh63"
+Hyper2000 = "j2gW43Dh"
 
 BATTERY_TARGET_IDLE        = "idle"
 BATTERY_TARGET_CHARGING    = "charging"
@@ -32,8 +33,9 @@ class Solarflow:
     def default_calllback(self):
         log.info("default callback")
 
-    def __init__(self, client: mqtt_client, product_id:str, device_id:str, full_charge_interval:int, control_bypass:bool = False, control_soc:bool = False, disable_full_discharge:bool = False, callback = default_calllback):
-        self.client = client
+    def __init__(self, clientLocal: mqtt_client,clientCloud: mqtt_client, product_id:str, device_id:str, full_charge_interval:int, control_bypass:bool = False, control_soc:bool = False, disable_full_discharge:bool = False, callback = default_calllback):
+        self.clientLocal = clientLocal
+        self.clientCloud = clientCloud
         self.productId = product_id
         self.deviceId = device_id
         self.fullChargeInterval = full_charge_interval
@@ -97,11 +99,10 @@ class Solarflow:
 
     def update(self):
         log.info(f'Triggering telemetry update: iot/{self.productId}/{self.deviceId}/properties/read')
-        self.client.publish(f'iot/{self.productId}/{self.deviceId}/properties/read','{"properties": ["getAll"]}')
+        self.clientCloud.publish(f'iot/{self.productId}/{self.deviceId}/properties/read','{"properties": ["getAll"]}')
 
     def subscribe(self):
-        topics = [
-            f'/{self.productId}/{self.deviceId}/properties/report',
+        topicsLocal = [
             f'solarflow-hub/{self.deviceId}/telemetry/solarInputPower',
             f'solarflow-hub/{self.deviceId}/telemetry/electricLevel',
             f'solarflow-hub/{self.deviceId}/telemetry/outputPackPower',
@@ -116,9 +117,20 @@ class Solarflow:
             f'solarflow-hub/{self.deviceId}/telemetry/batteries/+/totalVol',
             f'solarflow-hub/{self.deviceId}/control/#'
         ]
-        for t in topics:
-            self.client.subscribe(t)
-            log.info(f'Hub subscribing: {t}')
+        topicsCloud = [
+            f'/{self.productId}/{self.deviceId}/properties/report',
+            f'/{self.productId}/{self.deviceId}/#',
+            f'iot/{self.productId}/{self.deviceId}/#'
+        ]
+
+        for t in topicsLocal:
+            self.clientLocal.subscribe(t)
+            log.info(f'Local Hub subscribing: {t}')
+        
+        for t in topicsCloud:
+            self.clientCloud.subscribe(t)
+            log.info(f'Zendure Hub subscribing: {t}')
+
 
     def ready(self):
         return (self.electricLevel > -1 and self.solarInputPower > -1)
@@ -129,7 +141,7 @@ class Solarflow:
             "messageId": 123,
             "timestamp": ts
         }
-        self.client.publish(f'iot/{self.productId}/{self.deviceId}/time-sync/reply',json.dumps(payload))
+        self.clientCloud.publish(f'iot/{self.productId}/{self.deviceId}/time-sync/reply',json.dumps(payload))
 
     def pushHomeassistantConfig(self):
         log.info("Publishing Homeassistant templates...")
@@ -144,10 +156,10 @@ class Solarflow:
                 for index, (serial,v) in enumerate(self.batteriesVol.items()):
                     hacfg = template.render(product_id=self.productId, device_id=self.deviceId, fw_version=self.fwVersion, battery_serial=serial, battery_index=index+1)
                     if serial != "none":
-                        self.client.publish(f'homeassistant/{cfg_type}/solarflow-hub-{self.deviceId}-{serial}-{cfg_name}/config',hacfg,retain=True)
+                        self.clientLocal.publish(f'homeassistant/{cfg_type}/solarflow-hub-{self.deviceId}-{serial}-{cfg_name}/config',hacfg,retain=True)
             else:
                 hacfg = template.render(product_id=self.productId, device_id=self.deviceId, fw_version=self.fwVersion)
-                self.client.publish(f'homeassistant/{cfg_type}/solarflow-hub-{self.deviceId}-{cfg_name}/config',hacfg,retain=True)
+                self.clientLocal.publish(f'homeassistant/{cfg_type}/solarflow-hub-{self.deviceId}-{cfg_name}/config',hacfg,retain=True)
             #log.info(hacfg)
         log.info(f"Published {len(hatemplates)} Homeassistant templates.")
 
@@ -159,7 +171,7 @@ class Solarflow:
         # TODO: experimental, trigger limit calculation only on significant changes of smartmeter
         previous = self.solarInputValues.previous()
         if abs(previous - self.getSolarInputPower()) >= TRIGGER_DIFF:
-            log.info(f'HUB triggers limit function: {previous} -> {self.getSolarInputPower()}: {"executed" if self.trigger_callback(self.client) else "skipped"}')
+            log.info(f'HUB triggers limit function: {previous} -> {self.getSolarInputPower()}: {"executed" if self.trigger_callback(self.clientLocal, self.clientCloud) else "skipped"}')
             self.last_trigger_value = self.getSolarInputPower()
 
     def updElectricLevel(self, value:int):
@@ -181,7 +193,7 @@ class Solarflow:
                     self.setChargeThrough(False)
             
             self.lastFullTS = datetime.now()
-            self.client.publish(f'solarflow-hub/{self.deviceId}/control/lastFullTimestamp',int(datetime.timestamp(self.lastFullTS)),retain=True)
+            self.clientLocal.publish(f'solarflow-hub/{self.deviceId}/control/lastFullTimestamp',int(datetime.timestamp(self.lastFullTS)),retain=True)
         # handle user given max SoC
         elif value >= self.batteryHigh and not self.chargeThrough:
             batteryTarget = BATTERY_TARGET_DISCHARGING
@@ -200,7 +212,7 @@ class Solarflow:
                 self.setChargeThrough(False)
 
             self.lastEmptyTS = datetime.now()
-            self.client.publish(f'solarflow-hub/{self.deviceId}/control/lastEmptyTimestamp',int(datetime.timestamp(self.lastEmptyTS)),retain=True)
+            self.clientLocal.publish(f'solarflow-hub/{self.deviceId}/control/lastEmptyTimestamp',int(datetime.timestamp(self.lastEmptyTS)),retain=True)
         # handle user given min SoC
         elif value <= self.batteryLow and not self.chargeThrough:
             batteryTarget = BATTERY_TARGET_CHARGING
@@ -216,7 +228,7 @@ class Solarflow:
                 self.setBypass(True)
                 self.allow_bypass = False
 
-            self.client.publish(f'solarflow-hub/{self.deviceId}/control/batteryTarget',batteryTarget,retain=True)
+            self.clientLocal.publish(f'solarflow-hub/{self.deviceId}/control/batteryTarget',batteryTarget,retain=True)
 
         self.electricLevel = value
         
@@ -279,7 +291,7 @@ class Solarflow:
             return
         
         # in case of setups with no direct panels connected to inverter it is necessary to turn on the inverter as it is likely offline now
-        inv = self.client._userdata['dtu']
+        inv = self.clientLocal._userdata['dtu']
         if (not inv.ready()) and self.getOutputHomePower() == 0:
             # this will power on the inverter so that control can resume from an interrupted charge-through
             self.setOutputLimit(30)
@@ -287,7 +299,7 @@ class Solarflow:
         if self.chargeThrough != chargeThrough:
             log.info(f'Set ChargeThrough: {self.chargeThrough} => {chargeThrough}')
             self.setChargeThroughStage(BATTERY_TARGET_CHARGING if chargeThrough else BATTERY_TARGET_IDLE)
-            self.client.publish(f'solarflow-hub/{self.deviceId}/control/chargeThrough','ON' if chargeThrough else 'OFF')
+            self.clientLocal.publish(f'solarflow-hub/{self.deviceId}/control/chargeThrough','ON' if chargeThrough else 'OFF')
 
         self.chargeThrough = chargeThrough
 
@@ -298,7 +310,7 @@ class Solarflow:
         log.info(f'Updateing charge through stage: {self.chargeThroughStage} => {stage}')
         batteryHigh = 100 if stage in [BATTERY_TARGET_CHARGING, BATTERY_TARGET_DISCHARGING] else self.batteryHigh
         batteryLow = 0 if stage == BATTERY_TARGET_DISCHARGING and self.allowFullCycle else self.batteryLow
-        self.client.publish(f'solarflow-hub/{self.deviceId}/control/chargeThroughState', stage)
+        self.clientLocal.publish(f'solarflow-hub/{self.deviceId}/control/chargeThroughState', stage)
         self.setBatteryHighSoC(batteryHigh, True)
         self.setBatteryLowSoC(batteryLow, True)
         self.chargeThroughStage = stage
@@ -346,7 +358,7 @@ class Solarflow:
             if "properties" in payload:
                 props = payload["properties"]
                 for prop, val in props.items():
-                    self.client.publish(f'solarflow-hub/{device_id}/telemetry/{prop}',val)
+                    self.clientLocal.publish(f'solarflow-hub/{device_id}/telemetry/{prop}',val)
 
             if "packData" in payload:
                 packdata = payload["packData"]
@@ -354,7 +366,7 @@ class Solarflow:
                     for pack in packdata:
                         sn = pack.pop('sn')
                         for prop, val in pack.items():
-                            self.client.publish(f'solarflow-hub/{device_id}/telemetry/batteries/{sn}/{prop}',val)
+                            self.clientLocal.publish(f'solarflow-hub/{device_id}/telemetry/batteries/{sn}/{prop}',val)
 
         if msg.topic.startswith('solarflow-hub') and msg.payload:
             # check if we got regular updates on solarInputPower
@@ -463,7 +475,7 @@ class Solarflow:
 
         outputlimit = {"properties": { "outputLimit": limit }}
         if self.outputLimit != limit:
-            (not self.dryrun) and self.client.publish(self.property_topic,json.dumps(outputlimit))
+            (not self.dryrun) and self.clientCloud.publish(self.property_topic,json.dumps(outputlimit))
             self.lastLimitTS = now
             log.info(f'{"[DRYRUN] " if self.dryrun else ""}Setting solarflow output limit to {limit:.1f}W')
         else:
@@ -472,17 +484,17 @@ class Solarflow:
 
     def setBuzzer(self, state: bool):
         buzzer = {"properties": { "buzzerSwitch": 0 if not state else 1 }}
-        self.client.publish(self.property_topic,json.dumps(buzzer))
+        self.clientCloud.publish(self.property_topic,json.dumps(buzzer))
         log.info(f'Turning hub buzzer {"ON" if state else "OFF"}')
     
     def setAutorecover(self, state: bool):
         autorecover = {"properties": { "autoRecover": 0 if not state else 1 }}
-        self.client.publish(self.property_topic,json.dumps(autorecover))
+        self.clientCloud.publish(self.property_topic,json.dumps(autorecover))
         log.info(f'Turning hub bypass autorecover {"ON" if state else "OFF"}')
 
     def setBypass(self, state: bool):
         passmode = {"properties": { "passMode": 2 if state else 1 }}
-        self.client.publish(self.property_topic,json.dumps(passmode))
+        self.clientCloud.publish(self.property_topic,json.dumps(passmode))
         log.info(f'Turning hub bypass {"ON" if state else "OFF"}')
         if not state:
             self.bypass = state         # required for cases where we can't wait on confirmation on turning bypass off
@@ -541,7 +553,7 @@ class Solarflow:
             return self.batteryLow
 
         payload = {"properties": { "socSet": level * 10 }}
-        self.client.publish(self.property_topic,json.dumps(payload))
+        self.clientCloud.publish(self.property_topic,json.dumps(payload))
         log.info(f'Setting maximum charge level to {level}%')
         return level
 
@@ -554,7 +566,7 @@ class Solarflow:
             return self.batteryLow
 
         payload = {"properties": { "minSoc": level * 10 }}
-        self.client.publish(self.property_topic,json.dumps(payload))
+        self.clientCloud.publish(self.property_topic,json.dumps(payload))
         log.info(f'Setting minimum charge level to {level}%')
         return level
 
@@ -573,12 +585,12 @@ class Solarflow:
         if value <= 100:
             value = 100
         payload = {"properties": { "inverseMaxPower": value }}
-        self.client.publish(self.property_topic,json.dumps(payload))
+        self.clientCloud.publish(self.property_topic,json.dumps(payload))
         self.inverseMaxPower = value
         return value
     
     def setPvBrand(self, brand:int = 1):
         brand_str = INVERTER_BRAND.get(brand,f'Unkown [{brand}]')
         payload = {"properties": { "pvBrand": brand }}
-        self.client.publish(self.property_topic,json.dumps(payload))
+        self.clientCloud.publish(self.property_topic,json.dumps(payload))
         log.info(f'Setting inverter brand to {brand_str}')

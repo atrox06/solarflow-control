@@ -13,6 +13,7 @@ from solarflow import Solarflow
 import dtus
 import smartmeters
 from utils import RepeatedTimer, str2bool
+import webService
 
 FORMAT = '%(asctime)s:%(levelname)s: %(message)s'
 logging.basicConfig(stream=sys.stdout, level="INFO", format=FORMAT)
@@ -32,7 +33,7 @@ def stroption(option):
 def load_config():
     config = configparser.ConfigParser(converters={"str":stroption, "list":listoption})
     try:
-        with open("config.ini","r") as cf:
+        with open("src/solarflow/config.ini","r") as cf:
             config.read_file(cf)
     except:
         log.error("No configuration file (config.ini) found in execution directory! Using environment variables.")
@@ -42,15 +43,7 @@ config = load_config()
 
 
 
-'''
-Configuration Options
-'''
-sf_device_id = config.get('solarflow', 'device_id', fallback=None) or os.environ.get('SF_DEVICE_ID',None)
-sf_product_id = config.get('solarflow', 'product_id', fallback="73bkTV") or os.environ.get('SF_PRODUCT_ID',"73bkTV")
-mqtt_user = config.get('mqtt', 'mqtt_user', fallback=None) or os.environ.get('MQTT_USER',None)
-mqtt_pwd = config.get('mqtt', 'mqtt_pwd', fallback=None) or os.environ.get('MQTT_PWD',None)
-mqtt_host = config.get('mqtt', 'mqtt_host', fallback=None) or os.environ.get('MQTT_HOST',None)
-mqtt_port = config.getint('mqtt', 'mqtt_port', fallback=None) or os.environ.get('MQTT_PORT',1883)
+
 
 
 DTU_TYPE =              config.get('global', 'dtu_type', fallback=None) \
@@ -112,11 +105,12 @@ location: LocationInfo
 #                    or os.environ.get('TOPIC_HOUSE',None)
 #topics_house =      [ t.strip() for t in topic_house.split(',')] if topic_house else []
 
-client_id = f'solarflow-ctrl-{random.randint(0, 100)}'
+client_id_local = f'solarflow-ctrl-{random.randint(0, 100)}'
 
 lastTriggerTS:datetime = None
 
 class MyLocation:
+
     def getCoordinates(self) -> tuple:
         lat = lon = 0.0
         try:
@@ -131,6 +125,40 @@ class MyLocation:
             log.error(f'Can\'t determine location from my IP. Location detection failed, no accurate sunrise/sunset detection possible',e.args)
 
         return (lat,lon)
+
+def on_message_cloud(client, userdata, msg):
+    global SUNRISE_OFFSET, SUNSET_OFFSET, MIN_CHARGE_POWER, MAX_DISCHARGE_POWER, DISCHARGE_DURING_DAYTIME
+    log.info(f"Message received on topic {msg.topic} with payload {msg.payload}")
+    # Delegate message handling to hub
+    hub = userdata["hub"]
+    hub.handleMsg(msg)
+
+def on_connect_cloud(client, userdata, flags, rc):
+    if rc == 0:
+        log.info("Connected to MQTT Broker!")
+        hub = client._userdata['hub']
+      
+        #hub.subscribe()
+        hub.setBuzzer(False)
+        hub.setPvBrand(1)
+        hub.setInverseMaxPower(MAX_INVERTER_INPUT)
+        hub.setBatteryHighSoC(BATTERY_HIGH)
+        hub.setBatteryLowSoC(BATTERY_LOW)
+        if hub.control_bypass:
+            hub.setBypass(False)
+            hub.setAutorecover(False)
+    else:
+        log.error(f"Failed to connect, return code {rc}")
+
+def subscribe_cloud(client: mqtt_client):
+    client.on_message = on_message_cloud
+    topics = [
+        f'/{sf_product_id}/{sf_device_id}/#'
+    ]
+    for t in topics:
+        client.subscribe(t)
+        log.info(f'SFControl subscribing: {t}')
+
 
 def on_message(client, userdata, msg):
     global SUNRISE_OFFSET, SUNSET_OFFSET, MIN_CHARGE_POWER, MAX_DISCHARGE_POWER, DISCHARGE_DURING_DAYTIME
@@ -176,7 +204,7 @@ def on_connect(client, userdata, flags, rc):
         client.publish(f'solarflow-hub/{sf_device_id}/control/maxDischargePower',MAX_DISCHARGE_POWER,retain=True)
         client.publish(f'solarflow-hub/{sf_device_id}/control/dischargeDuringDaytime',str(DISCHARGE_DURING_DAYTIME),retain=True)
 
-        hub.subscribe()
+        #hub.subscribe()
         hub.setBuzzer(False)
         hub.setPvBrand(1)
         hub.setInverseMaxPower(MAX_INVERTER_INPUT)
@@ -198,13 +226,17 @@ def on_disconnect(client, userdata, rc):
     else:
         log.error("Disconnected from MQTT broker!")
 
-def connect_mqtt() -> mqtt_client:
+def connect_mqtt(client_id, mqtt_user, mqtt_pwd, mqtt_host, mqtt_port, cloud=False) -> mqtt_client:
     client = mqtt_client.Client(client_id)
     if mqtt_user is not None and mqtt_pwd is not None:
         client.username_pw_set(mqtt_user, mqtt_pwd)
-    client.on_connect = on_connect
-    client.on_disconnect = on_disconnect
-    client.connect(mqtt_host, mqtt_port)
+    if cloud:
+        client.on_connect = on_connect_cloud
+        client.on_message = on_message_cloud
+    else:
+        client.on_connect = on_connect
+        client.on_disconnect = on_disconnect
+    client.connect(mqtt_host, int(mqtt_port))
     return client
 
 def subscribe(client: mqtt_client):
@@ -308,10 +340,10 @@ def getSFPowerLimit(hub, demand) -> int:
     return int(limit)
 
 
-def limitHomeInput(client: mqtt_client):
+def limitHomeInput(client: mqtt_client, zendure_client: mqtt_client):
     global location
 
-    hub = client._userdata['hub']
+    hub = zendure_client._userdata['hub']
     log.info(f'{hub}')
     inv = client._userdata['dtu']
     log.info(f'{inv}')
@@ -453,7 +485,7 @@ def getOpts(configtype) -> dict:
             log.info(f'No config setting found for option "{opt}" in section {configtype.__name__.lower()}!')
     return opts
 
-def limit_callback(client: mqtt_client,force=False):
+def limit_callback(client: mqtt_client, zendure_client:mqtt_client, force=False):
     global lastTriggerTS
     #log.info("Smartmeter Callback!")
     now = datetime.now()
@@ -468,11 +500,11 @@ def limit_callback(client: mqtt_client,force=False):
             return False
     else:
         lastTriggerTS = now
-        limitHomeInput(client)
+        limitHomeInput(client,zendure_client)
         return True
 
-def deviceInfo(client:mqtt_client):
-    limitHomeInput(client)
+def deviceInfo(client:mqtt_client, zendure_client:mqtt_client):
+    limitHomeInput(client, zendure_client)
     '''
     hub = client._userdata['hub']
     log.info(f'{hub}')
@@ -484,32 +516,145 @@ def deviceInfo(client:mqtt_client):
 
 
 def run():
-    client = connect_mqtt()
+    log.info("Starting run function")
+    use_cloud = config.getboolean('global', 'use_cloud', fallback=None) or os.environ.get('USE_CLOUD', False)
+    log.info(f"use_cloud: {use_cloud}")
+
+    zendure_client = connect_mqtt(
+        client_id=getClientId(cloud=use_cloud),
+        mqtt_user=getMqttUser(cloud=use_cloud),
+        mqtt_pwd=getMqttPwd(cloud=use_cloud),
+        mqtt_host=getMqttHost(cloud=use_cloud),
+        mqtt_port=getMqttPort(cloud=use_cloud),
+        cloud=use_cloud
+    )
+    log.info(f"Zendure client connected to {getMqttHost(cloud=use_cloud)}:{getMqttPort(cloud=use_cloud)} with client ID {getClientId(cloud=use_cloud)}")
+
+    client = connect_mqtt(
+        client_id=getClientId(cloud=False),
+        mqtt_user=getMqttUser(cloud=False),
+        mqtt_pwd=getMqttPwd(cloud=False),
+        mqtt_host=getMqttHost(cloud=False),
+        mqtt_port=getMqttPort(cloud=False)
+    )
+    log.info(f"Local client connected to {getMqttHost(cloud=False)}:{getMqttPort(cloud=False)} with client ID {getClientId(cloud=False)}")
+
     hub_opts = getOpts(Solarflow)
-    hub = Solarflow(client=client,callback=limit_callback,**hub_opts)
+    hub = Solarflow(clientLocal=client, clientCloud=zendure_client, callback=limit_callback, **hub_opts)
+    log.info(f"Hub initialized with options: {hub_opts}")
 
     dtuType = getattr(dtus, DTU_TYPE)
     dtu_opts = getOpts(dtuType)
-    dtu = dtuType(client=client,ac_limit=MAX_INVERTER_LIMIT,callback=limit_callback,**dtu_opts)
+    dtu = dtuType(client=client, ac_limit=MAX_INVERTER_LIMIT, callback=limit_callback, **dtu_opts)
+    log.info(f"DTU initialized with options: {dtu_opts}")
 
     smtType = getattr(smartmeters, SMT_TYPE)
     smt_opts = getOpts(smtType)
-    smt = smtType(client=client,callback=limit_callback, **smt_opts)
+    smt = smtType(client=client, callback=limit_callback, **smt_opts)
+    log.info(f"Smartmeter initialized with options: {smt_opts}")
 
-    client.user_data_set({"hub":hub, "dtu":dtu, "smartmeter":smt})
+    client.user_data_set({"hub": hub, "dtu": dtu, "smartmeter": smt})
     client.on_message = on_message
+    log.info("Local client user data and on_message set")
 
-    infotimer = RepeatedTimer(120, deviceInfo, client)
+    zendure_client.user_data_set({"hub": hub})
+    zendure_client.on_message = on_message_cloud
+    log.info("Zendure client user data and on_message_cloud set")
 
-    #client.loop_start()
-    client.loop_forever()
+    infotimer = RepeatedTimer(120, deviceInfo, client, zendure_client)
+    log.info("Infotimer started")
+
+    # Start both clients in separate threads
+    zendure_client.loop_start()
+    log.info("Zendure client loop started")
+
+    client.loop_start()
+    log.info("Local client loop started")
+
+    # Token-Refresh-Timer starten
+    token_refresh_timer = RepeatedTimer(300, getClientId, cloud=True)
+    log.info("Token refresh timer started")
+
+    # Ensure subscribe is called only once per client
+    hub.subscribe()
+    log.info("Hub subscribed to topics")
+
+    # Keep the main thread alive
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        client.loop_stop()
+        zendure_client.loop_stop()
+        token_refresh_timer.stop()
+        log.info("Clients and token refresh timer stopped")
+
+access_token = None
+token_expiry_time = None
+
+def getClientId(cloud: bool = False):
+    global access_token, token_expiry_time
+    if cloud is False:
+        return client_id_local
+
+    current_time = time.time()
+    if access_token is None or (token_expiry_time is not None and current_time >= token_expiry_time):
+        access_token = webService.login(
+            config.get('cloudweb', 'cloud_web_user', fallback=None),
+            config.get('cloudweb', 'cloud_web_pwd', fallback=None, raw=True),
+            config.get('cloudweb', 'token_url', fallback=None)
+        )
+        token_expiry_time = current_time + 300  # Token expires in 5 minutes (300 seconds)
+    return access_token
+
+def getMqttPwd(cloud:bool = False):
+    if cloud:
+    #if config.getboolean('global', 'use_cloud') is True: 
+        return config.get('cloudmqtt', 'cloud_mqtt_pwd', fallback=None, raw=True)
+    else:
+        return config.get('mqtt', 'mqtt_pwd', fallback=None, raw=True) or os.environ.get('MQTT_PWD',None)
+
+def getMqttUser(cloud:bool = False):
+    if cloud:
+    #if config.getboolean('global', 'use_cloud') is True: 
+        return config.get('cloudmqtt', 'cloud_mqtt_user', fallback=None)
+    else:
+        return config.get('mqtt', 'mqtt_user', fallback=None) or os.environ.get('MQTT_USER',None)
+
+def getMqttHost(cloud:bool = False):
+    if cloud:
+    #if config.getboolean('global', 'use_cloud') is True: 
+        return config.get('cloudmqtt', 'cloud_mqtt_host', fallback=None)
+    else:
+        return config.get('mqtt', 'mqtt_host', fallback=None) or os.environ.get('MQTT_HOST',None)
+
+def getMqttPort(cloud:bool = False):
+    if cloud:
+    #if config.getboolean('global', 'use_cloud') is True: 
+        return config.get('cloudmqtt', 'cloud_mqtt_port', fallback=None)
+    else:
+        return config.getint('mqtt', 'mqtt_port', fallback=1833) or os.environ.get('MQTT_PORT',1883)
+
+'''
+Configuration Options
+'''
+sf_device_id = config.get('solarflow', 'device_id', fallback="gDa3tb") or os.environ.get('SF_DEVICE_ID',"gDa3tb")
+sf_product_id = config.get('solarflow', 'product_id', fallback="j2gW43Dh") or os.environ.get('SF_PRODUCT_ID',"j2gW43Dh")
+mqtt_user = getMqttUser()
+mqtt_pwd = getMqttPwd()
+
+mqtt_host = getMqttHost()
+mqtt_port = getMqttPort()    
+
+
+
 
 def main(argv):
     global mqtt_host, mqtt_port, mqtt_user, mqtt_pwd
     global sf_device_id
     global limit_inverter
     global location
-    opts, args = getopt.getopt(argv,"hb:p:u:s:d:",["broker=","port=","user=","password="])
+    opts, args = getopt.getopt(argv, "hb:p:u:s:d:c:", ["broker=", "port=", "user=", "password=", "device=", "config="])
     for opt, arg in opts:
         if opt == '-h':
             log.info('solarflow-control.py -b <MQTT Broker Host> -p <MQTT Broker Port>')
@@ -524,6 +669,8 @@ def main(argv):
             mqtt_pwd = arg
         elif opt in ("-d", "--device"):
             sf_device_id = arg
+        elif opt in ("-c", "--config"):
+            config_file = arg
 
     if mqtt_host is None:
         log.error("You need to provide a local MQTT broker (environment variable MQTT_HOST or option --broker)!")
