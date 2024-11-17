@@ -25,15 +25,15 @@ BATTERY_TARGET_DISCHARGING = "discharging"
 
 # according to https://github.com/epicRE/zendure_ble
 INVERTER_BRAND = {0: 'Other', 1: 'Hoymiles', 2: 'Enphase', 3: 'APsystems', 4: 'Anker', 5: 'Deye', 6: 'BossWerk', 7: 'Tsun'}
-AC_MODE = {'NOTHING': 0, 'AC_INPUT': 1, 'CHARGING': 1, 'AC_OUTPUT': 2, 'DISCHARGING': 2}
+AC_MODE = {0: 'NOTHING', 1:'CHARGING', 2:'DISCHARGING'}
 
 class Solarflow:
-    opts = {"product_id":str, "device_id":str ,"full_charge_interval":int, "control_bypass":bool, "control_soc":bool, "disable_full_discharge":bool}
+    opts = {"product_id": str, "device_id": str, "full_charge_interval": int, "control_bypass": bool, "control_soc": bool, "disable_full_discharge": bool}
 
     def default_calllback(self):
         log.info("default callback")
 
-    def __init__(self, clientLocal: mqtt_client,clientCloud: mqtt_client, product_id:str, device_id:str, full_charge_interval:int, control_bypass:bool = False, control_soc:bool = False, disable_full_discharge:bool = False, callback = default_calllback):
+    def __init__(self, clientLocal: mqtt_client, clientCloud: mqtt_client, product_id: str, device_id: str, full_charge_interval: int, control_bypass: bool = False, control_soc: bool = False, disable_full_discharge: bool = False, callback=default_calllback):
         self.clientLocal = clientLocal
         self.clientCloud = clientCloud
         self.productId = product_id
@@ -46,14 +46,14 @@ class Solarflow:
         self.packInputPower = 0         # discharging power of battery pack
         self.outputHomePower = -1       # power sent to home
         self.bypass = False             # Power Bypass Active/Inactive
-        self.control_bypass = control_bypass    # wether we control the bypass switch or the hubs firmware
-        self.bypass_mode = -1           # bypassmode the hub is operating in 0=auto, 1=manual off, 2=manual on
+        self.control_bypass = control_bypass    # whether we control the bypass switch or the hub's firmware
+        self.bypass_mode = -1           # bypass mode the hub is operating in 0=auto, 1=manual off, 2=manual on
         self.allow_bypass = True        # if bypass can be currently enabled or not
         self.electricLevel = -1         # state of charge of battery pack
-        self.batteriesSoC = {"none":-1}    # state of charge for individual batteries
-        self.batteriesVol = {"none":-1}    # voltage for individual batteries
+        self.batteriesSoC = {"none": -1}    # state of charge for individual batteries
+        self.batteriesVol = {"none": -1}    # voltage for individual batteries
         self.outputLimit = -1           # power limit for home output
-        self.inputLimit = -1           # power limit for hyper input
+        self.inputLimit = -1            # power limit for hyper input
         self.inverseMaxPower = 300      # maximum power sent to inverter from hub (read and updated from hub)
         self.outputLimitBuffer = TimewindowBuffer(minutes=1)
         self.inputLimitBuffer = TimewindowBuffer(minutes=1)
@@ -62,8 +62,8 @@ class Solarflow:
         self.lastSolarInputTS = None    # time of the last received solar input value
         self.batteryTarget = None
         self.allowFullCycle = not disable_full_discharge
-        self.acMode = AC_MODE.get('Nothing')
-        
+        self.acMode = 0
+        self.gridInputPower = 0
         self.batteryTargetSoCMax = -1
         self.batteryTargetSoCMin = -1
         self.batteryLow = -1
@@ -98,7 +98,11 @@ class Solarflow:
                         F:{self.getLastFullBattery():3.1f}h, \
                         E:{self.getLastEmptyBattery():3.1f}h, \
                         H:{self.outputHomePower:>3}W, \
-                        L:{self.outputLimit:>3}W{reset}'.split())
+                        L:{self.outputLimit:>3}W, \
+                        I:{self.inputLimit:>3}W, \
+                        A:{self.acMode}:{AC_MODE.get(self.acMode)}{reset}'.split())
+    
+    
 
     def update(self):
         log.info(f'Triggering telemetry update: iot/{self.productId}/{self.deviceId}/properties/read')
@@ -112,6 +116,9 @@ class Solarflow:
             f'solarflow-hub/{self.deviceId}/telemetry/packInputPower',
             f'solarflow-hub/{self.deviceId}/telemetry/outputHomePower',
             f'solarflow-hub/{self.deviceId}/telemetry/outputLimit',
+            f'solarflow-hub/{self.deviceId}/telemetry/inputLimit',
+            f'solarflow-hub/{self.deviceId}/telemetry/gridInputPower',
+            f'solarflow-hub/{self.deviceId}/telemetry/acMode',
             f'solarflow-hub/{self.deviceId}/telemetry/inverseMaxPower',
             f'solarflow-hub/{self.deviceId}/telemetry/masterSoftVersion',
             f'solarflow-hub/{self.deviceId}/telemetry/pass',
@@ -256,6 +263,9 @@ class Solarflow:
     def updInputLimit(self, value:int):
         self.inputLimit = value
     
+    def updGridInputPower(self, value:int):
+        self.gridInputPower = value
+    
     def setAcMode(self, value:int):
         self.acMode = value
         
@@ -354,12 +364,12 @@ class Solarflow:
         self.batteryTarget = value
         log.info(f'Reading battery target mode: {value}')
 
-    def setSunriseSoC(self, soc:int):
+    def setSunriseSoC(self, soc: int):
         self.sunriseSoC = soc
         if self.sunsetSoC:
             self.nightConsumption = self.sunsetSoC - self.sunriseSoC
 
-    def setSunsetSoC(self, soc:int):
+    def setSunsetSoC(self, soc: int):
         self.sunsetSoC = soc
 
     def getNightConsumption(self):
@@ -409,29 +419,29 @@ class Solarflow:
             value = msg.payload.decode()
             match metric:
                 case "electricLevel":
-                    self.updElectricLevel(int(value))
+                    self.updElectricLevel(int(float(value)))
                 case "solarInputPower":
-                    self.updSolarInput(int(value))
+                    self.updSolarInput(int(float(value)))
                 case "outputPackPower":
-                    self.updOutputPack(int(value))
+                    self.updOutputPack(int(float(value)))
                 case "packInputPower":
-                    self.updPackInput(int(value))
+                    self.updPackInput(int(float(value)))
                 case "outputHomePower":
-                    self.updOutputHome(int(value))
+                    self.updOutputHome(int(float(value)))
                 case "outputLimit":
-                    self.updOutputLimit(int(value))
+                    self.updOutputLimit(int(float(value)))
                 case "inputLimit":
-                    self.updInputLimit(int(value))
+                    self.updInputLimit(int(float(value)))
                 case "inverseMaxPower":
-                    self.updInverseMaxPower(int(value))
+                    self.updInverseMaxPower(int(float(value)))
                 case "socLevel":
                     sn = msg.topic.split('/')[-2]
-                    self.updBatterySoC(sn=sn, value=int(value))
+                    self.updBatterySoC(sn=sn, value=int(float(value)))
                 case "totalVol":
                     sn = msg.topic.split('/')[-2]
-                    self.updBatteryVol(sn=sn, value=int(value))
+                    self.updBatteryVol(sn=sn, value=int(float(value)))
                 case "masterSoftVersion":
-                    self.updMasterSoftVersion(value=int(value))
+                    self.updMasterSoftVersion(value=int(float(value)))
                 case "chargeThrough":
                     self.setChargeThrough(value)
                 case "controlBypass":
@@ -454,6 +464,8 @@ class Solarflow:
                     self.updBatteryTargetSoCMin(int(value))
                 case "acMode":
                     self.updAcMode(int(value))
+                case "gridInputPower":
+                    self.updGridInputPower(int(float(value)))
                 case "chargeThroughState":
                     pass
                 case _:
@@ -616,13 +628,22 @@ class Solarflow:
 
     def getLimit(self):
         return self.outputLimit
+    
+    def getOutputLimit(self):
+        return self.outputLimit    
 
     def getBypass(self):
         return self.bypass
     
     def getAcMode(self):
         return self.acMode
-        
+
+    def getInputLimit(self):
+        return self.inputLimit
+
+    def getGridInputPower(self):
+        return self.gridInputPower
+            
     def getCanDischarge(self):
         fullage = self.getLastFullBattery()
         can_discharge = (self.batteryTarget == BATTERY_TARGET_DISCHARGING) or (self.batteryTarget == BATTERY_TARGET_CHARGING and fullage < self.fullChargeInterval)

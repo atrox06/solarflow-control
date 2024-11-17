@@ -58,7 +58,11 @@ MIN_CHARGE_POWER =      config.getint('control', 'min_charge_power', fallback=No
 
 # The maximum discharge level of the packSoc. Even if there is more demand it will not go beyond that
 MAX_DISCHARGE_POWER =   config.getint('control', 'max_discharge_power', fallback=None) \
-                        or int(os.environ.get('MAX_DISCHARGE_POWER',145))   
+                        or int(os.environ.get('MAX_DISCHARGE_POWER',145)) 
+
+MAX_GRID_CHARGE_POWER = config.getint('control', 'max_grid_charge_power', fallback=None) 
+
+MIN_GRID_CHARGE_POWER = config.getint('control', 'min_grid_charge_power', fallback=None)
 
 # battery SoC levels to consider the battery full or empty
 BATTERY_LOW =           config.getint('control', 'battery_low', fallback=None) \
@@ -128,7 +132,7 @@ class MyLocation:
 
 def on_message_cloud(client, userdata, msg):
     global SUNRISE_OFFSET, SUNSET_OFFSET, MIN_CHARGE_POWER, MAX_DISCHARGE_POWER, DISCHARGE_DURING_DAYTIME
-    log.info(f"Message received on topic {msg.topic} with payload {msg.payload}")
+    #log.info(f"Message received on topic {msg.topic} with payload {msg.payload}")
     # Delegate message handling to hub
     hub = userdata["hub"]
     hub.handleMsg(msg)
@@ -377,7 +381,7 @@ def limitHomeInput(client: mqtt_client):
     remainder = demand - direct_panel_power - hub_power        # eq grid_power
     hub_contribution_ask = hub_power+remainder     # the power we need from hub
     hub_contribution_ask = 0 if hub_contribution_ask < 0 else hub_contribution_ask
-
+    hyper_contribution_ask = grid_power
 
     # sunny, producing
     if direct_panel_power > 0:
@@ -439,23 +443,51 @@ def limitHomeInput(client: mqtt_client):
         if hub.getElectricLevel() < BATTERY_HIGH and grid_power > MIN_CHARGE_POWER:
             log.info(f'Grid power is {grid_power}W, setting battery target to CHARGING')
             currenteMode = hub.getAcMode()
-            if currenteMode is None and not 1:
+            if currenteMode is None or currenteMode != 1:
                 log.info(f'Hub is not in CHARGING mode, setting it now!')
                 hub.setAcMode(1)
+                hub.setOutputLimit(0)
             
-            hub.setInputLimit(100)
+            inputLimit = hub.getInputLimit()
+            gridInputPower = hub.getGridInputPower()
+            if gridInputPower > 0 and hub.getAcMode() == 1:
+                chargingPower = grid_power + gridInputPower
+                if chargingPower > MAX_GRID_CHARGE_POWER:
+                    chargingPower = MAX_GRID_CHARGE_POWER
+                chargingPower = int(chargingPower)
+                log.info(f'Set charging to {chargingPower}W bcause grid power is {grid_power}W, current gridInputPower is {gridInputPower}, input limit is {inputLimit}W')
+                hub.setInputLimit(chargingPower)
+            else:
+                chargingPower = grid_power
+                if chargingPower > MAX_GRID_CHARGE_POWER:
+                    chargingPower = MAX_GRID_CHARGE_POWER
+                chargingPower = int(chargingPower)
+                log.info(f'Hub is not charging, setting input limit to {chargingPower}W')
+                hub.setInputLimit(chargingPower)
             
-        else: # battery is full or grid power is negative   
+
+            
+        else: # battery is full or grid power is negative  
+
             log.info(f'Grid power is {grid_power}W, setting battery target to DISCHARGING')
+
             currenteMode = hub.getAcMode()
-            if currenteMode is None and not 2:
-                log.info(f'Hub is not in DISCHARGING mode, setting it now!')
-                hub.setAcMode(2)
+            outputHomePower = hub.getOutputHomePower()
+            if currenteMode is None or currenteMode != 2:
+                hub.setInputLimit(0) # first stop charging before we switch to discharging
+            else:
+                outputLimit = hub.getOutputLimit()
+                if outputHomePower > 0 and currenteMode == 2:
+                    dischargingPower = int(abs(grid_power) + outputHomePower - 50)
+                    if dischargingPower > MAX_DISCHARGE_POWER:
+                        dischargingPower = MAX_DISCHARGE_POWER
+                    log.info(f'Set discharging to {dischargingPower}W because grid power is {grid_power}W , current outputHomePower is {outputHomePower}, output limit is {outputLimit}W')
+                    log.info(f'Hub is not in DISCHARGING mode, setting it now!')
+                    hub.setAcMode(2)
+                    hub.setInputLimit(0)    
+                    
+                    hub.setOutputLimit(dischargingPower)
             
-            #hub.setAcMode(hub.AC_MODE.get('DISCHARGING'))
-            #hub.setAcMode(2)
-            hub.setOutputLimit(100)
-        
         
     # likely no sun, not producing, eveything comes from hub
     else:
@@ -742,6 +774,7 @@ def main(argv):
     log.info(f'Limit via inverter: {limit_inverter}')
 
     log.info("Control Parameters:")
+    log.info(f'  INVERTER_START_LIMIT = {INVERTER_START_LIMIT}')
     log.info(f'  MIN_CHARGE_POWER = {MIN_CHARGE_POWER}')
     log.info(f'  MAX_DISCHARGE_LEVEL = {MAX_DISCHARGE_POWER}')
     log.info(f'  MAX_INVERTER_LIMIT = {MAX_INVERTER_LIMIT}')
