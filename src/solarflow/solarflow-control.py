@@ -467,7 +467,7 @@ def limitHomeInput(client: mqtt_client):
             
 
             
-        else: # battery is full or grid power is negative  
+        elif grid_power < 0 and hub.getelectricLevel() > BATTERY_LOW:
 
             log.info(f'Grid power is {grid_power}W, setting battery target to DISCHARGING')
 
@@ -488,7 +488,16 @@ def limitHomeInput(client: mqtt_client):
                     
                     hub.setOutputLimit(dischargingPower)
             
-        
+        else:
+            log.info(f'Grid power is {grid_power}W, electric level is {hub.getElectricLevel()}%, no action needed')
+            if hub.getAcMode() != 0:
+                hub.setAcMode(0)
+                hub.setInputLimit(0)
+                hub.setOutputLimit(0)
+            
+
+
+
     # likely no sun, not producing, eveything comes from hub
     else:
         log.info(f'Direct connected panel are producing {direct_panel_power:.1f}W, trying to get {hub_contribution_ask:.1f}W from hub.')
