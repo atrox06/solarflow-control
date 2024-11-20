@@ -33,7 +33,7 @@ def stroption(option):
 def load_config():
     config = configparser.ConfigParser(converters={"str":stroption, "list":listoption})
     try:
-        with open("src/solarflow/config.ini","r") as cf:
+        with open("config.ini","r") as cf:
             config.read_file(cf)
     except:
         log.error("No configuration file (config.ini) found in execution directory! Using environment variables.")
@@ -467,7 +467,7 @@ def limitHomeInput(client: mqtt_client):
             
 
             
-        elif grid_power < 0 and hub.getelectricLevel() > BATTERY_LOW:
+        elif grid_power < 0 and hub.getElectricLevel() > BATTERY_LOW:
 
             log.info(f'Grid power is {grid_power}W, setting battery target to DISCHARGING')
 
