@@ -33,7 +33,7 @@ def stroption(option):
 def load_config():
     config = configparser.ConfigParser(converters={"str":stroption, "list":listoption})
     try:
-        with open("config.ini","r") as cf:
+        with open("src/solarflow/config-test.ini","r") as cf:
             config.read_file(cf)
     except:
         log.error("No configuration file (config.ini) found in execution directory! Using environment variables.")
@@ -475,6 +475,8 @@ def limitHomeInput(client: mqtt_client):
             outputHomePower = hub.getOutputHomePower()
             if currenteMode is None or currenteMode != 2:
                 hub.setInputLimit(0) # first stop charging before we switch to discharging
+                hub.setOutputLimit(0)
+                hub.setAcMode(2)
             else:
                 outputLimit = hub.getOutputLimit()
                 if outputHomePower > 0 and currenteMode == 2:
@@ -482,7 +484,6 @@ def limitHomeInput(client: mqtt_client):
                     if dischargingPower > MAX_DISCHARGE_POWER:
                         dischargingPower = MAX_DISCHARGE_POWER
                     log.info(f'Set discharging to {dischargingPower}W because grid power is {grid_power}W , current outputHomePower is {outputHomePower}, output limit is {outputLimit}W')
-                    log.info(f'Hub is not in DISCHARGING mode, setting it now!')
                     hub.setAcMode(2)
                     hub.setInputLimit(0)    
                     
@@ -490,10 +491,7 @@ def limitHomeInput(client: mqtt_client):
             
         else:
             log.info(f'Grid power is {grid_power}W, electric level is {hub.getElectricLevel()}%, no action needed')
-            if hub.getAcMode() != 0:
-                hub.setAcMode(0)
-                hub.setInputLimit(0)
-                hub.setOutputLimit(0)
+
             
 
 
