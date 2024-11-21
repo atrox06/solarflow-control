@@ -442,8 +442,8 @@ def limitHomeInput(client: mqtt_client):
 
         if hub.getElectricLevel() < BATTERY_HIGH and grid_power > MIN_CHARGE_POWER:
             log.info(f'Grid power is {grid_power}W, setting battery target to CHARGING')
-            currenteMode = hub.getAcMode()
-            if currenteMode is None or currenteMode != 1:
+            currentMode = hub.getAcMode()
+            if currentMode is None or currentMode != 1:
                 log.info(f'Hub is not in CHARGING mode, setting it now!')
                 hub.setAcMode(1)
                 hub.setOutputLimit(0)
@@ -471,15 +471,15 @@ def limitHomeInput(client: mqtt_client):
 
             log.info(f'Grid power is {grid_power}W, setting battery target to DISCHARGING')
 
-            currenteMode = hub.getAcMode()
+            currentMode = hub.getAcMode()
             outputHomePower = hub.getOutputHomePower()
-            if currenteMode is None or currenteMode != 2:
+            if currentMode is None or currentMode != 2:
                 hub.setInputLimit(0) # first stop charging before we switch to discharging
                 hub.setOutputLimit(0)
                 hub.setAcMode(2)
             else:
                 outputLimit = hub.getOutputLimit()
-                if outputHomePower > 0 and currenteMode == 2:
+                if outputHomePower > 0 and currentMode == 2:
                     dischargingPower = int(abs(grid_power) + outputHomePower - 50)
                     if dischargingPower > MAX_DISCHARGE_POWER:
                         dischargingPower = MAX_DISCHARGE_POWER
