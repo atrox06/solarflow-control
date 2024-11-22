@@ -33,8 +33,12 @@ def stroption(option):
 def load_config():
     config = configparser.ConfigParser(converters={"str":stroption, "list":listoption})
     try:
-        with open("src/solarflow/config-test.ini","r") as cf:
-            config.read_file(cf)
+        # if config_file is not None:
+        #     with open(config_file,"r") as cf:
+        #         config.read_file(cf)
+        # else:
+            with open("config-test.ini","r") as cf:
+                config.read_file(cf)
     except:
         log.error("No configuration file (config.ini) found in execution directory! Using environment variables.")
     return config
@@ -142,7 +146,7 @@ def on_connect_cloud(client, userdata, flags, rc):
         log.info("Connected to MQTT Broker!")
         hub = client._userdata['hub']
       
-        #hub.subscribe()
+        hub.subscribe()
         hub.setBuzzer(False)
         hub.setPvBrand(1)
         #hub.setInverseMaxPower(MAX_INVERTER_INPUT)
@@ -240,7 +244,7 @@ def connect_mqtt(client_id, mqtt_user, mqtt_pwd, mqtt_host, mqtt_port, cloud=Fal
     else:
         client.on_connect = on_connect
         client.on_disconnect = on_disconnect
-    client.connect(mqtt_host, int(mqtt_port))
+    client.connect(mqtt_host, int(mqtt_port), 60)
     return client
 
 def subscribe(client: mqtt_client):
@@ -374,14 +378,14 @@ def limitHomeInput(client: mqtt_client):
     hub_power = inv.getHubDCPower() * (inv.getEfficiency()/100)
 
     grid_power = smt.getPower() - smt.zero_offset
-    inv_acpower = inv.getCurrentACPower()
+  
 
     demand = grid_power + direct_panel_power + hub_power
 
     remainder = demand - direct_panel_power - hub_power        # eq grid_power
     hub_contribution_ask = hub_power+remainder     # the power we need from hub
     hub_contribution_ask = 0 if hub_contribution_ask < 0 else hub_contribution_ask
-    hyper_contribution_ask = grid_power
+
 
     # sunny, producing
     if direct_panel_power > 0:
@@ -440,23 +444,33 @@ def limitHomeInput(client: mqtt_client):
         # if the grid power is negative, we should not charge
         # if the grid power is positive, we should charge
 
-        if hub.getElectricLevel() < BATTERY_HIGH and grid_power > MIN_CHARGE_POWER:
+        inputLimit = hub.getInputLimit()
+        gridInputPower = hub.getGridInputPower()
+        acmode = hub.getAcMode()
+
+        outputHomePower = hub.getOutputHomePower()
+        outputLimit = hub.getOutputLimit()
+
+        electricLevel = hub.getElectricLevel()
+
+        if electricLevel < BATTERY_HIGH and (grid_power + gridInputPower) > MIN_GRID_CHARGE_POWER:
             log.info(f'Grid power is {grid_power}W, setting battery target to CHARGING')
-            currentMode = hub.getAcMode()
-            if currentMode is None or currentMode != 1:
+            
+            if acmode is None or acmode != 1:
                 log.info(f'Hub is not in CHARGING mode, setting it now!')
                 hub.setAcMode(1)
                 hub.setOutputLimit(0)
             
-            inputLimit = hub.getInputLimit()
-            gridInputPower = hub.getGridInputPower()
-            if gridInputPower > 0 and hub.getAcMode() == 1:
+            acmode = hub.getAcMode() # update acmode
+
+            if gridInputPower > 0 and acmode == 1:
                 chargingPower = grid_power + gridInputPower
                 if chargingPower > MAX_GRID_CHARGE_POWER:
                     chargingPower = MAX_GRID_CHARGE_POWER
                 chargingPower = int(chargingPower)
                 log.info(f'Set charging to {chargingPower}W bcause grid power is {grid_power}W, current gridInputPower is {gridInputPower}, input limit is {inputLimit}W')
                 hub.setInputLimit(chargingPower)
+
             else:
                 chargingPower = grid_power
                 if chargingPower > MAX_GRID_CHARGE_POWER:
@@ -467,30 +481,37 @@ def limitHomeInput(client: mqtt_client):
             
 
             
-        elif grid_power < 0 and hub.getElectricLevel() > BATTERY_LOW:
+        elif grid_power + gridInputPower < 0 and electricLevel > BATTERY_LOW:
 
             log.info(f'Grid power is {grid_power}W, setting battery target to DISCHARGING')
 
-            currentMode = hub.getAcMode()
-            outputHomePower = hub.getOutputHomePower()
-            if currentMode is None or currentMode != 2:
+
+
+            if acmode is None or acmode != 2:
+                log.info(f'Hub is not in DISCHARGING mode, setting it now!')
                 hub.setInputLimit(0) # first stop charging before we switch to discharging
                 hub.setOutputLimit(0)
                 hub.setAcMode(2)
-            else:
-                outputLimit = hub.getOutputLimit()
-                if outputHomePower > 0 and currentMode == 2:
+            else: # we are already in discharging mode, check if we need to adjust the output limit
+                
+                if acmode == 2:
                     dischargingPower = int(abs(grid_power) + outputHomePower - 50)
                     if dischargingPower > MAX_DISCHARGE_POWER:
                         dischargingPower = MAX_DISCHARGE_POWER
                     log.info(f'Set discharging to {dischargingPower}W because grid power is {grid_power}W , current outputHomePower is {outputHomePower}, output limit is {outputLimit}W')
-                    hub.setAcMode(2)
-                    hub.setInputLimit(0)    
-                    
+                    #hub.setAcMode(2)
+                    #hub.setInputLimit(0)                        
                     hub.setOutputLimit(dischargingPower)
             
         else:
-            log.info(f'Grid power is {grid_power}W, electric level is {hub.getElectricLevel()}%, no action needed')
+            
+            if acmode == 1:
+                log.info(f'AcMode is CHARGING, inputLimit is {inputLimit}W, grid power is {grid_power}W, electric level is {electricLevel}%, no action needed')
+            elif acmode == 2:
+                log.info(f'AcMode is DISCHARGING, outputLimit is {outputLimit}W, grid power is {grid_power}W, electric level is {electricLevel}%, no action needed')
+            else:
+
+                log.info(f'Grid power is {grid_power}W, electric level is {electricLevel}%, no action needed')
 
             
 
@@ -597,14 +618,17 @@ def run():
     use_cloud = config.getboolean('global', 'use_cloud', fallback=None) or os.environ.get('USE_CLOUD', False)
     log.info(f"use_cloud: {use_cloud}")
 
-    zendure_client = connect_mqtt(
-        client_id=getClientId(cloud=use_cloud),
-        mqtt_user=getMqttUser(cloud=use_cloud),
-        mqtt_pwd=getMqttPwd(cloud=use_cloud),
-        mqtt_host=getMqttHost(cloud=use_cloud),
-        mqtt_port=getMqttPort(cloud=use_cloud),
-        cloud=use_cloud
-    )
+    def connect_zendure_client():
+        return connect_mqtt(
+            client_id=getClientId(cloud=use_cloud),
+            mqtt_user=getMqttUser(cloud=use_cloud),
+            mqtt_pwd=getMqttPwd(cloud=use_cloud),
+            mqtt_host=getMqttHost(cloud=use_cloud),
+            mqtt_port=getMqttPort(cloud=use_cloud),
+            cloud=use_cloud
+        )
+    global zendure_client
+    zendure_client = connect_zendure_client()
     log.info(f"Zendure client connected to {getMqttHost(cloud=use_cloud)}:{getMqttPort(cloud=use_cloud)} with client ID {getClientId(cloud=use_cloud)}")
 
     client = connect_mqtt(
@@ -654,8 +678,24 @@ def run():
     client.loop_start()
     log.info("Local client loop started")
 
+    # Token-Refresh-Funktion
+    def refresh_token():
+        global zendure_client
+        #getClientId(cloud=True)  # Aktualisiere den Token
+        new_zendure_client = connect_zendure_client()
+        #zendure_client.reinitialise(client_id=getClientId(use_cloud), clean_session=False)
+        
+        
+        zendure_client = new_zendure_client
+        zendure_client.user_data_set({"hub": hub, "dtu": dtu, "smartmeter": smt})
+        zendure_client.on_message = on_message_cloud
+        hub.updClientCloud(zendure_client)
+        
+        log.info("Zendure client reconnected with new token")
+
+
     # Token-Refresh-Timer starten
-    token_refresh_timer = RepeatedTimer(300, getClientId, cloud=True)
+    token_refresh_timer = RepeatedTimer(600, refresh_token)
     log.info("Token refresh timer started")
 
     # Ensure subscribe is called only once per client
@@ -669,7 +709,7 @@ def run():
     except KeyboardInterrupt:
         client.loop_stop()
         zendure_client.loop_stop()
-        token_refresh_timer.stop()
+        #token_refresh_timer.stop()
         log.info("Clients and token refresh timer stopped")
 
 access_token = None
@@ -687,8 +727,9 @@ def getClientId(cloud: bool = False):
             config.get('cloudweb', 'cloud_web_pwd', fallback=None, raw=True),
             config.get('cloudweb', 'token_url', fallback=None)
         )
-        token_expiry_time = current_time + 300  # Token expires in 5 minutes (300 seconds)
+        token_expiry_time = current_time + 30  # Token expires in 5 minutes (300 seconds)
         log.info(f"Access token refreshed at {datetime.fromtimestamp(current_time).strftime('%Y-%m-%d %H:%M:%S')}")
+        log.info(f"Access token: {access_token}")
     
     devicelist = webService.get_device_list(access_token, config.get('cloudweb', 'device_list_url', fallback=None))
     if devicelist:
@@ -743,6 +784,7 @@ def main(argv):
     global sf_device_id
     global limit_inverter
     global location
+    global config_file
     opts, args = getopt.getopt(argv, "hb:p:u:s:d:c:", ["broker=", "port=", "user=", "password=", "device=", "config="])
     for opt, arg in opts:
         if opt == '-h':

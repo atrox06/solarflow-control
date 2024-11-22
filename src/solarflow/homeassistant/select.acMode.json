@@ -1,0 +1,17 @@
+{
+    "name": "AC Mode",
+    "cmd_t": "iot/{{ product_id }}/{{ device_id }}/properties/write",
+    "cmd_tpl": "{\"properties\": {\"acMode\": {% raw %}{{ 0 if value=='Nothing' else (1 if value=='Charging' else (2 if value=='Discharging')) }}{% endraw %} }}",
+    "stat_t": "~acMode",
+    "uniq_id": "{{ device_id }}-acMode",
+    "val_tpl": "{% raw %}{{ 'Nothing' if is_state('sensor.solarflow_hub_ac_mode', 'Nothing') else ('Charging' if is_state('sensor.solarflow_hub_ac_mode', 'Charging') else ('Discharging' if is_state('sensor.solarflow_hub_ac_mode', 'Discharging') else 'Unknown')) }}{% endraw %}",
+    "ops": ["Auto","Off","On","Unknown"],
+    "dev": {
+      "identifiers": ["{{ device_id }}"],
+      "manufacturer": "Zendure",
+      "model": "Solarflow",
+      "name": "Solarflow Hub",
+      "sw_version": "{{ fw_version }}"
+    },
+    "~": "solarflow-hub/{{ device_id }}/telemetry/"
+}

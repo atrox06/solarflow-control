@@ -102,7 +102,11 @@ class Solarflow:
                         I:{self.inputLimit:>3}W, \
                         A:{self.acMode}:{AC_MODE.get(self.acMode)}{reset}'.split())
     
-    
+    def updClientCloud(self, new_clientCloud: mqtt_client):
+        self.clientCloud.loop_stop()
+        self.clientCloud = new_clientCloud
+        self.clientCloud.loop_start()
+        log.info("clientCloud updated and reconnected")
 
     def update(self):
         log.info(f'Triggering telemetry update: iot/{self.productId}/{self.deviceId}/properties/read')
@@ -155,6 +159,7 @@ class Solarflow:
 
     def pushHomeassistantConfig(self):
         log.info("Publishing Homeassistant templates...")
+        
         hatemplates = [f for f in pathlib.Path().glob("homeassistant/*.json")]
         environment = Environment(loader=FileSystemLoader("homeassistant/"), undefined=DebugUndefined)
 

@@ -9,18 +9,26 @@
             "type": "debugpy",
             "request": "launch",
             "program": "${file}",
-            "console": "integratedTerminal"
+            "console": "integratedTerminal",
+            "cwd": "${workspaceFolder}",  // Setzt das Arbeitsverzeichnis auf das Stammverzeichnis des Arbeitsbereichs
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}"
+            }
         },
         {
             "name": "Python Debugger: solarflow-control with Arguments",
             "type": "debugpy",
             "request": "launch",
-            "program": "src/solarflow/solarflow-control.py",
+            "program": "${workspaceFolder}/src/solarflow/solarflow-control.py",
             "console": "integratedTerminal",
             "args": [
                 "--config",
-                "src/solarflow/config.ini",
-            ]
+                "${workspaceFolder}/src/solarflow//config-test.ini",
+            ],
+            "cwd": "${workspaceFolder}/src/solarflow/",  // Setzt das Arbeitsverzeichnis auf das Stammverzeichnis des Arbeitsbereichs
+            "env": {
+                "PYTHONPATH": "${workspaceFolder}/src/solarflow/"
+            }
             //"args": "${command:pickArgs}"
         }
     ]
