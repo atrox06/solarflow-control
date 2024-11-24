@@ -37,7 +37,7 @@ def load_config():
         #     with open(config_file,"r") as cf:
         #         config.read_file(cf)
         # else:
-            with open("config-test.ini","r") as cf:
+            with open("config.ini","r") as cf:
                 config.read_file(cf)
     except:
         log.error("No configuration file (config.ini) found in execution directory! Using environment variables.")
@@ -453,7 +453,7 @@ def limitHomeInput(client: mqtt_client):
 
         electricLevel = hub.getElectricLevel()
 
-        if electricLevel < BATTERY_HIGH and (grid_power + gridInputPower) > MIN_GRID_CHARGE_POWER:
+        if (electricLevel < BATTERY_HIGH and (grid_power + gridInputPower) > MIN_GRID_CHARGE_POWER):
             log.info(f'Grid power is {grid_power}W, setting battery target to CHARGING')
             
             if acmode is None or acmode != 1:
@@ -481,7 +481,7 @@ def limitHomeInput(client: mqtt_client):
             
 
             
-        elif grid_power + gridInputPower < 0 and electricLevel > BATTERY_LOW:
+        elif (grid_power + gridInputPower < 0 and electricLevel > BATTERY_LOW) or acmode == 2:
 
             log.info(f'Grid power is {grid_power}W, setting battery target to DISCHARGING')
 
