@@ -37,8 +37,8 @@ def load_config():
         #     with open(config_file,"r") as cf:
         #         config.read_file(cf)
         # else:
-            with open("config.ini","r") as cf:
-                config.read_file(cf)
+        with open("config.ini","r") as cf:
+            config.read_file(cf)
     except:
         log.error("No configuration file (config.ini) found in execution directory! Using environment variables.")
     return config
