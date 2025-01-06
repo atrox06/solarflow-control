@@ -62,7 +62,10 @@ MIN_CHARGE_POWER =      config.getint('control', 'min_charge_power', fallback=No
 
 # The maximum discharge level of the packSoc. Even if there is more demand it will not go beyond that
 MAX_DISCHARGE_POWER =   config.getint('control', 'max_discharge_power', fallback=None) \
-                        or int(os.environ.get('MAX_DISCHARGE_POWER',145)) 
+                        or int(os.environ.get('MAX_DISCHARGE_POWER',1200)) 
+
+MIN_DISCHARGE_POWER =   config.getint('control', 'min_discharge_power', fallback=None) \
+                        or int(os.environ.get('MIN_DISCHARGE_POWER',100)) 
 
 MAX_GRID_CHARGE_POWER = config.getint('control', 'max_grid_charge_power', fallback=None) 
 
@@ -192,6 +195,9 @@ def on_message(client, userdata, msg):
             case "minChargePower":
                 MIN_CHARGE_POWER = int(value)
                 log.info(f'Updating MIN_CHARGE_POWER to {MIN_CHARGE_POWER} W')
+            case "minDischargePower":
+                MIN_DISCHARGE_POWER = int(value)
+                log.info(f'Updating MIN_DISCHARGE_POWER to {MIN_DISCHARGE_POWER} W')
             case "maxDischargePower":
                 MAX_DISCHARGE_POWER = int(value)
                 log.info(f'Updating MAX_DISCHARGE_POWER to {MAX_DISCHARGE_POWER} W')
@@ -359,7 +365,7 @@ def limitHomeInput(client: mqtt_client):
     log.info(f'{smt}')
 
     # ensure we have data to work on
-    invready = inv.ready()
+    invready = inv.ready() # TODO fix ready for roof solar
     if config.get('global', "dtu_type") == "None":
         invready = True
         
@@ -453,6 +459,7 @@ def limitHomeInput(client: mqtt_client):
 
         electricLevel = hub.getElectricLevel()
 
+        # Charge the battery if it is below the low level and the grid power is higher than the minimum charge power
         if (electricLevel < BATTERY_HIGH and (grid_power + gridInputPower) > MIN_GRID_CHARGE_POWER):
             log.info(f'Grid power is {grid_power}W, setting battery target to CHARGING')
             
@@ -480,8 +487,8 @@ def limitHomeInput(client: mqtt_client):
                 hub.setInputLimit(chargingPower)
             
 
-            
-        elif (grid_power + gridInputPower < 0 and electricLevel > BATTERY_LOW) or acmode == 2:
+        # Discharge the battery if it is above the high level and the grid power is lower than the minimum charge power
+        elif (grid_power + gridInputPower < MIN_DISCHARGE_POWER and electricLevel > BATTERY_LOW) or acmode == 2:
 
             log.info(f'Grid power is {grid_power}W, setting battery target to DISCHARGING')
 
@@ -495,12 +502,22 @@ def limitHomeInput(client: mqtt_client):
             else: # we are already in discharging mode, check if we need to adjust the output limit
                 
                 if acmode == 2:
-                    dischargingPower = int(abs(grid_power) + outputHomePower - 50)
+                    #dischargingPower = int(abs(grid_power) + outputHomePower - 50)
+                    
+                    if grid_power < 0:
+                        # Grid power is negative, power is being fed into the grid
+                        dischargingPower = int(abs(grid_power) + outputHomePower - 50)
+                    else:
+                        # Grid power is positive, power is being drawn from the grid
+                        dischargingPower = int(outputHomePower - grid_power - 50)
+
                     if dischargingPower > MAX_DISCHARGE_POWER:
                         dischargingPower = MAX_DISCHARGE_POWER
+                    elif dischargingPower < MIN_DISCHARGE_POWER:
+                        dischargingPower = 0
+
                     log.info(f'Set discharging to {dischargingPower}W because grid power is {grid_power}W , current outputHomePower is {outputHomePower}, output limit is {outputLimit}W')
-                    #hub.setAcMode(2)
-                    #hub.setInputLimit(0)                        
+                       
                     hub.setOutputLimit(dischargingPower)
             
         else:
@@ -695,7 +712,7 @@ def run():
 
 
     # Token-Refresh-Timer starten
-    token_refresh_timer = RepeatedTimer(600, refresh_token)
+    token_refresh_timer = RepeatedTimer(6000, refresh_token)
     log.info("Token refresh timer started")
 
     # Ensure subscribe is called only once per client
@@ -803,6 +820,9 @@ def main(argv):
         elif opt in ("-c", "--config"):
             config_file = arg
 
+    config = load_config()
+
+    
     if mqtt_host is None:
         log.error("You need to provide a local MQTT broker (environment variable MQTT_HOST or option --broker)!")
         sys.exit(0)

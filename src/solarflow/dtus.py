@@ -57,7 +57,7 @@ class DTU:
             log.info(f'DTU subscribing: {t}')
     
     def ready(self):
-        return len(self.channelsDCPower) > 0
+        return len(self.channelsDCPower) > 0 or self.getCurrentACPower() > 0
     
     def updChannelPowerDC(self,channel:int, value:float):
         log.debug(f'Channel Power: {len(self.channelsDCPower)}/{channel} : {value}')
@@ -121,6 +121,9 @@ class DTU:
     def getEfficiency(self):
         return self.efficiency
     
+    def updACPower(self, value:float):
+        self.acPower.add(value)
+
     def getACPower(self):
         return self.acPower.qwavg()
     
@@ -261,6 +264,44 @@ class DTU:
 
         return inv_limit
     
+class RoofSolar(DTU):
+    opts = {"base_topic":str}
+    limit_topic = "cmd/limit_nonpersistent_absolute"
+    limit_unit = ""
+
+    def __init__(self, client: mqtt_client, base_topic:str, ac_limit:int=800, callback = DTU.default_calllback):
+        super().__init__(client=client,base_topic=base_topic, sf_inverter_channels=0, ac_limit=ac_limit, callback=callback)
+        self.base_topic = f'{base_topic}'
+        self.limit_nonpersistent_absolute = f'{self.base_topic}/{self.limit_topic}'
+        log.info(f'Using {type(self).__name__}: Base topic: {self.base_topic}, Limit topic: {self.limit_nonpersistent_absolute}, SF Channels: {self.sf_inverter_channels}, AC Limit: {self.acLimit}')
+
+    def subscribe(self):
+        topics = [
+            f'{self.base_topic}/0/powerdc',
+            f'{self.base_topic}/0/efficiency',
+            f'{self.base_topic}/+/power',
+            f'{self.base_topic}/status/producing',
+            f'{self.base_topic}/status/reachable',
+            f'{self.base_topic}/status/limit_absolute',
+            f'{self.base_topic}/status/limit_relative',
+            f'{self.base_topic}/#'
+        ]
+        super().subscribe(topics)
+
+    def handleMsg(self, msg):
+        if msg.topic.startswith(self.base_topic) and msg.payload:
+            metric = msg.topic.split('/')[-1]
+            value = float(msg.payload.decode())
+            log.debug(f'DTU received {metric}:{value}')
+            match metric:
+                case "powerdc":
+                    self.updTotalPowerDC(value)
+                case "state":
+                    self.updACPower(value)
+                case _:
+                    log.warning(f'Ignoring inverter metric: {metric} {msg.payload.decode()}')
+        
+        super().handleMsg(msg)
 
 class OpenDTU(DTU):
     opts = {"base_topic":str ,"inverter_serial":str,"sf_inverter_channels":list}
