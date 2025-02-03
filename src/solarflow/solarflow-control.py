@@ -30,15 +30,15 @@ def listoption(option):
 def stroption(option):
     return option
 
-def load_config():
+def load_config(file_path=None):
     config = configparser.ConfigParser(converters={"str":stroption, "list":listoption})
     try:
-        # if config_file is not None:
-        #     with open(config_file,"r") as cf:
-        #         config.read_file(cf)
-        # else:
-        with open("config.ini","r") as cf:
-            config.read_file(cf)
+        if file_path is not None:
+            with open(file_path,"r") as cf:
+                config.read_file(cf)
+        else:
+            with open("config-test.ini","r") as cf:
+                config.read_file(cf)
     except:
         log.error("No configuration file (config.ini) found in execution directory! Using environment variables.")
     return config
@@ -506,16 +506,16 @@ def limitHomeInput(client: mqtt_client):
                     
                     if grid_power < 0:
                         # Grid power is negative, power is being fed into the grid
-                        dischargingPower = int(abs(grid_power) + outputHomePower - 50)
+                        dischargingPower = int(outputHomePower - abs(grid_power) - 50)
                     else:
                         # Grid power is positive, power is being drawn from the grid
-                        dischargingPower = int(outputHomePower - grid_power - 50)
+                        dischargingPower = int(outputHomePower + grid_power - 50)
 
                     if dischargingPower > MAX_DISCHARGE_POWER:
                         dischargingPower = MAX_DISCHARGE_POWER
                     elif dischargingPower < MIN_DISCHARGE_POWER:
                         dischargingPower = 0
-
+                        
                     log.info(f'Set discharging to {dischargingPower}W because grid power is {grid_power}W , current outputHomePower is {outputHomePower}, output limit is {outputLimit}W')
                        
                     hub.setOutputLimit(dischargingPower)
