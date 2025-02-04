@@ -506,7 +506,7 @@ def limitHomeInput(client: mqtt_client):
                     
                     if grid_power < 0:
                         # Grid power is negative, power is being fed into the grid
-                        dischargingPower = int(outputHomePower - abs(grid_power) - 50)
+                        dischargingPower = int(abs(outputHomePower - abs(grid_power) - 50))
                     else:
                         # Grid power is positive, power is being drawn from the grid
                         dischargingPower = int(outputHomePower + grid_power - 50)
